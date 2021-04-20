@@ -31,6 +31,7 @@ Tested on CentOS 5 / 6 / 7 / 8
 from __future__ import print_function
 
 import os
+import platform
 import re
 import sys
 import signal
@@ -117,6 +118,7 @@ class YumTester(object):
         self.timeout = DEFAULT_TIMEOUT
         self.verbosity = 0
         self.warn_on_any_update = False
+        self.output_postprocessing = True
 
     def validate_all_variables(self):
         """Validates all object variables to make sure the
@@ -430,6 +432,7 @@ class YumTester(object):
                 num_security_updates = 0
             elif os.path.exists(DNF) and re.match('Updating Subscription Management repositories.', ''.join(output)):
                 (num_security_updates, num_total_updates) = self.yum_updateinfo()
+                output = []
             else:
                 end(WARNING, "Cannot find summary line in yum output. " + support_msg)
         if 'num_security_updates' not in locals():
@@ -446,37 +449,38 @@ class YumTester(object):
 
         num_other_updates = num_total_updates - num_security_updates
 
-        excluded_regex = re.compile('|'.join(
-            [' from .+ excluded ',
-             r'^\s*\*\s*',
-             r'^\s*$',
-             'Determining fastest mirrors',
-             'Updating Subscription Management repositories',
-             'Last metadata expiration check',
-             'Loaded plugins',
-             'Loading mirror speeds from cached hostfile',
-             'Obsoleting Packages',
-             'Failed to set locale',
-             'security updates? needed',
-             'updates? available',
-             'packages? available',
-             'Limiting package lists to security relevant ones',
-             'This system is receiving updates from RHN Classic or Red Hat Satellite.',
-             r'Repo [\w-]+ forced skip_if_unavailable=\w+ due to',
-             r'^\s*:\s+'
-             ]))
-        output = [_ for _ in output if not excluded_regex.search(_)]
-        # only count unique packages (first token), as some packages are duplicated in their output,
-        # especially when on Redhat Network subscriptions, see sample output in #328
-        #
-        # Python 2.6 compatability for RHEL6 - don't use set comprehension, cast instead it's more portable
-        # pylint: disable=consider-using-set-comprehension
-        len_output = len(set([_.split()[0] for _ in output if _]))
-        if len_output > num_total_updates:
-            self.vprint(3, "output lines not accounted for: %s" % output)
-            #self.vprint(3, "security updates: %s, total updates: %s" % (num_security_updates, num_total_updates))
-            end(WARNING, "Yum output signature (%s unique lines) is larger than number of total updates (%s). " \
-                         % (len_output, num_total_updates) + support_msg)
+        if self.output_postprocessing:
+            excluded_regex = re.compile('|'.join(
+                [' from .+ excluded ',
+                 r'^\s*\*\s*',
+                 r'^\s*$',
+                 'Determining fastest mirrors',
+                 'Updating Subscription Management repositories',
+                 'Last metadata expiration check',
+                 'Loaded plugins',
+                 'Loading mirror speeds from cached hostfile',
+                 'Obsoleting Packages',
+                 'Failed to set locale',
+                 'security updates? needed',
+                 'updates? available',
+                 'packages? available',
+                 'Limiting package lists to security relevant ones',
+                 'This system is receiving updates from RHN Classic or Red Hat Satellite.',
+                 r'Repo [\w-]+ forced skip_if_unavailable=\w+ due to',
+                 r'^\s*:\s+'
+                 ]))
+            output = [_ for _ in output if not excluded_regex.search(_)]
+            # only count unique packages (first token), as some packages are duplicated in their output,
+            # especially when on Redhat Network subscriptions, see sample output in #328
+            #
+            # Python 2.6 compatability for RHEL6 - don't use set comprehension, cast instead it's more portable
+            # pylint: disable=consider-using-set-comprehension
+            len_output = len(set([_.split()[0] for _ in output if _]))
+            if len_output > num_total_updates:
+                self.vprint(3, "output lines not accounted for: %s" % output)
+                #self.vprint(3, "security updates: %s, total updates: %s" % (num_security_updates, num_total_updates))
+                end(WARNING, "Yum output signature (%s unique lines) is larger than number of total updates (%s). " \
+                             % (len_output, num_total_updates) + support_msg)
 
         return num_security_updates, num_other_updates
 
@@ -486,25 +490,10 @@ class YumTester(object):
     # so we are only calling this on Redhat Network subscriptions where we have a sample output in #328 from a user
     def yum_updateinfo(self):
         """ runs 'yum updateinfo' and returns a tuple of the number of security updates and total updates """
-        output = self.run('yum updateinfo')
-        # for using debug outputs
-        #output = open(os.path.dirname(__file__) + '/yuminfo_input.txt').read().split('\n')
-        #self.vprint(3, "yuminfo output: %s" % output)
-        num_total_updates = 0
-        num_security_updates = 0
-        re_security_notices = re.compile(r'^\s*(\d+)\s+Security notice')
-        re_bugfix_notices = re.compile(r'^\s*(\d+)\s+Bugfix notice')
-        #re_new_package_notices = r'^(\d+)\s+New Package notice'
-        #re_enhancement_notices = r'^(\d+)\s+Enhancement notice'
-        #if 'Updates Information Summary: available' in output:
-        for line in output:
-            _ = re_security_notices.match(line)
-            if _:
-                num_security_updates = int(_.group(1))
-            _ = re_bugfix_notices.match(line)
-            if _:
-                num_total_updates += int(_.group(1))
-
+        output = self.run('yum updateinfo %s' % '--info' if int(platform.linux_distribution()[1].split('.')[0]) == 8 else '')
+        result = re.findall(r"={79}\r?\n\s+([^\r\n]+)\r?\n={79}\r?\n(?:\s*[^:]*:\s*[^\r\n]+\r?\n)(?:\s*Type:\s*([^\r\n]+)\r?\n)", "\n".join(output))
+        num_total_updates = len(result)
+        num_security_updates = sum([infotype == "security" for (infoheader, infotype) in result])
         return (num_security_updates, num_total_updates)
 
 
